@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #==================================================
 #  Sing-box + VLESS + REALITY 一键安装与管理脚本
-#  节点命名：sky+协议名+IP
+#  节点命名：sky+协议名+域名
 #  功能：
 #    - 安装或升级到最新稳定版 sing-box
 #    - 自动生成 UUID, Reality 密钥对, short ID
@@ -43,9 +43,12 @@ install_singbox(){
   TMPDIR=$(mktemp -d)
   curl -sL "$LATEST_URL" -o "$TMPDIR/sing-box.tar.gz"
   tar -C "$TMPDIR" -xzf "$TMPDIR/sing-box.tar.gz"
-  # 查找并安装 sing-box 可执行文件
-  BIN_PATH=$(find "$TMPDIR" -type f -name sing-box | head -n1)
-  mv "$BIN_PATH" /usr/local/bin/sing-box
+  # 尝试移动二进制: 支持多层目录
+  if ls "$TMPDIR"/*/sing-box >/dev/null 2>&1; then
+    mv "$TMPDIR"/*/sing-box /usr/local/bin/sing-box
+  else
+    mv "$TMPDIR"/sing-box /usr/local/bin/sing-box
+  fi
   chmod +x /usr/local/bin/sing-box
   rm -rf "$TMPDIR"
   echo "--> sing-box 安装完成: $(sing-box version)"
@@ -120,9 +123,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-enable_cmd="systemctl enable sing-box && systemctl restart sing-box"
-echo "==> 执行：\$enable_cmd"
-eval \$enable_cmd
+echo "==> 执行：systemctl enable sing-box && systemctl restart sing-box"
+systemctl enable sing-box && systemctl restart sing-box
 
 echo "==> sing-box 已启动并开机自启"
 
@@ -134,6 +136,7 @@ cat > /usr/local/bin/sb << EOF
 #!/usr/bin/env bash
 set -euo pipefail
 CONFIG_FILE="$CONFIG_FILE"
+
 case "\${1:-}" in
   info)
     UUID=\$(jq -r '.inbounds[0].clients[0].uuid' \$CONFIG_FILE)
@@ -149,8 +152,8 @@ case "\${1:-}" in
     bash <(curl -sL "$SCRIPT_URL")
     ;;
   *)
-    echo "用法: sb {info|qr|update}";
-    exit 1;
+    echo "用法: sb {info|qr|update}"
+    exit 1
     ;;
 esac
 EOF
