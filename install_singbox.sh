@@ -4,17 +4,13 @@
 #  节点命名：sky+协议名+IP
 #  功能：
 #    - 安装或升级到最新稳定版 sing-box
-#  
 #    - 自动生成 UUID, Reality 密钥对, short ID
-#  
 #    - 自动生成完整 config.json
-#  
 #    - 创建 systemd 服务
-#  
 #    - 安装依赖 jq, qrencode 并实现 sb 管理命令：
 #        sb info   -> 查看节点 URL
 #        sb qr     -> 生成并显示节点二维码
-#        sb update -> 更新 sing-box 程序
+#        sb update -> 更新并重跑安装脚本
 #==================================================
 
 set -euo pipefail
@@ -28,6 +24,8 @@ PORT=443
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 SERVICE_FILE="/etc/systemd/system/sing-box.service"
+# 原始脚本下载地址（用于 sb update）
+SCRIPT_URL="https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh"
 
 #-------------------------
 # 生成随机标识函数
@@ -40,13 +38,16 @@ gen_shortid(){ head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c6; }
 #-------------------------
 install_singbox(){
   echo "==> 检测并安装最新稳定版 sing-box ..."
-  LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+  LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
     | grep 'browser_download_url.*linux.*amd64\.tar\.gz' | cut -d '"' -f4)
-  mkdir -p /tmp/sing-box && cd /tmp/sing-box
-  curl -sL "$LATEST" -o sing-box.tar.gz
-  tar xzf sing-box.tar.gz
-  mv sing-box /usr/local/bin/sing-box
+  TMPDIR=$(mktemp -d)
+  curl -sL "$LATEST_URL" -o "$TMPDIR/sing-box.tar.gz"
+  tar -C "$TMPDIR" -xzf "$TMPDIR/sing-box.tar.gz"
+  # 查找并安装 sing-box 可执行文件
+  BIN_PATH=$(find "$TMPDIR" -type f -name sing-box | head -n1)
+  mv "$BIN_PATH" /usr/local/bin/sing-box
   chmod +x /usr/local/bin/sing-box
+  rm -rf "$TMPDIR"
   echo "--> sing-box 安装完成: $(sing-box version)"
 }
 
@@ -60,18 +61,17 @@ apt-get install -y curl jq qrencode
 install_singbox
 
 #-------------------------
-# 生成标识
+# 生成标识与 Reality 密钥对
 #-------------------------
 UUID=$(gen_uuid)
 SHORT_ID=$(gen_shortid)
 echo "==> 生成 Reality 密钥对..."
-# 生成一次公私钥对并分别提取
 KEY_JSON=$(sing-box reality generate-key)
 PRIVATE_KEY=$(echo "$KEY_JSON" | jq -r '.private_key')
 PUBLIC_KEY=$(echo "$KEY_JSON" | jq -r '.public_key')
 
 #-------------------------
-# 写入配置文件
+# 生成配置文件
 #-------------------------
 echo "==> 生成配置文件: $CONFIG_FILE"
 mkdir -p "$CONFIG_DIR"
@@ -79,23 +79,23 @@ cat > "$CONFIG_FILE" << EOF
 {
   "log": { "level": "info" },
   "inbounds": [{
-      "type": "vless",
-      "tag": "$NODE_PROTOCOL",
-      "listen": "0.0.0.0",
-      "listen_port": $PORT,
-      "sniff": true,
-      "decryption": "none",
-      "clients": [{
-          "uuid": "$UUID",
-          "flow": "xtls-rprx-vision",
-          "reality": {
-              "handshake": "x25519",
-              "private_key": "$PRIVATE_KEY",
-              "public_key": "$PUBLIC_KEY",
-              "short_id": "$SHORT_ID",
-              "max_time": 86400
-          }
-      }]
+    "type": "vless",
+    "tag": "$NODE_PROTOCOL",
+    "listen": "0.0.0.0",
+    "listen_port": $PORT,
+    "sniff": true,
+    "decryption": "none",
+    "clients": [{
+      "uuid": "$UUID",
+      "flow": "xtls-rprx-vision",
+      "reality": {
+        "handshake": "x25519",
+        "private_key": "$PRIVATE_KEY",
+        "public_key": "$PUBLIC_KEY",
+        "short_id": "$SHORT_ID",
+        "max_time": 86400
+      }
+    }]
   }],
   "outbounds": [{ "type": "direct", "tag": "direct" }]
 }
@@ -120,35 +120,33 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable sing-box
-systemctl restart sing-box
+enable_cmd="systemctl enable sing-box && systemctl restart sing-box"
+echo "==> 执行：\$enable_cmd"
+eval \$enable_cmd
 
-echo "==> sing-box 已启动并开启开机自启"
+echo "==> sing-box 已启动并开机自启"
 
 #-------------------------
 # 安装 sb 管理命令
 #-------------------------
 echo "==> 安装 sb 管理脚本到 /usr/local/bin/sb"
-cat > /usr/local/bin/sb << 'EOF'
+cat > /usr/local/bin/sb << EOF
 #!/usr/bin/env bash
 set -euo pipefail
-CONFIG_FILE="/etc/sing-box/config.json"
-# 请保持与安装脚本中相同的 DOMAIN 和 NODE_PROTOCOL
-DOMAIN="${DOMAIN}"
-NODE_PROTOCOL="${NODE_PROTOCOL}"
-case "$1" in
+CONFIG_FILE="$CONFIG_FILE"
+case "\${1:-}" in
   info)
-    UUID=$(jq -r '.inbounds[0].clients[0].uuid' $CONFIG_FILE)
-    PUBK=$(jq -r '.inbounds[0].clients[0].reality.public_key' $CONFIG_FILE)
-    SID=$(jq -r '.inbounds[0].clients[0].reality.short_id' $CONFIG_FILE)
-    URL="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&pbk=${PUBK}&sid=${SID}&flow=xtls-rprx-vision#sky-${NODE_PROTOCOL,,}-${DOMAIN}"
-    echo "节点 URL: $URL"
+    UUID=\$(jq -r '.inbounds[0].clients[0].uuid' \$CONFIG_FILE)
+    PUBK=\$(jq -r '.inbounds[0].clients[0].reality.public_key' \$CONFIG_FILE)
+    SID=\$(jq -r '.inbounds[0].clients[0].reality.short_id' \$CONFIG_FILE)
+    URL="vless://\${UUID}@\${DOMAIN}:\${PORT}?encryption=none&security=reality&pbk=\${PUBK}&sid=\${SID}&flow=xtls-rprx-vision#sky-\${NODE_PROTOCOL,,}-\${DOMAIN}"
+    echo "节点 URL: \$URL"
     ;;
   qr)
-    sb info | awk -F": " '{print $2}' | qrencode -t ANSIUTF8
+    sb info | awk -F": " '{print \$2}' | qrencode -t ANSIUTF8
     ;;
   update)
-    bash <(curl -s https://your.repo/install_singbox.sh)
+    bash <(curl -sL "$SCRIPT_URL")
     ;;
   *)
     echo "用法: sb {info|qr|update}";
@@ -158,5 +156,4 @@ esac
 EOF
 
 chmod +x /usr/local/bin/sb
-
 echo "==> 安装完成！使用 'sb info' 查看节点信息，'sb qr' 显示二维码，'sb update' 更新程序。"
