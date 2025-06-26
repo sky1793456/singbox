@@ -1,179 +1,263 @@
-#!/usr/bin/env bash
-#==================================================
-#  Sing-box + VLESS + REALITY 一键安装与管理脚本
-#  节点命名：sky+协议名+域名
-#
-#  使用：
-#    bash install_singbox.sh [-d DOMAIN] [-p PORT]
-#==================================================
+#!/bin/bash
+set -e
 
-set -euo pipefail
+# —— 环境与依赖 —— 
+echo "🛠 检测系统与安装依赖..."
+. /etc/os-release
+PM=apt; [[ "$ID" =~ ^(centos|rhel)$ ]] && PM=yum
+$PM update -y
+$PM install -y curl wget openssl uuid-runtime qrencode coreutils iptables
 
-#-------------------------
-# 默认配置，可被 -d/-p 覆盖
-#-------------------------
-NODE_PROTOCOL="VLESS-REALITY"
-DOMAIN="your.domain.com"
+# —— 初始化 & 安装 sing-box —— 
+UUID=$(uuidgen)
 PORT=443
-CONFIG_DIR="/etc/sing-box"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-SERVICE_FILE="/etc/systemd/system/sing-box.service"
-SCRIPT_URL="https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh"
+bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
+KEYS=$(sing-box generate reality-keypair)
+PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
+PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $3}')
+SHORT_ID=$(head -c4 /dev/urandom|xxd -p)
 
-usage(){
-  cat <<EOF
-用法：$(basename $0) [-d domain] [-p port]
+mkdir -p /etc/sing-box /var/log/sing-box
 
-  -d 域名或 IP（默认：$DOMAIN）
-  -p 监听端口   （默认：$PORT）
-EOF
-  exit 1
-}
+# —— 全局数组，存储多节点信息 —— 
+UUIDs=("$UUID")
+PORTs=("$PORT")
+SIDs=("$SHORT_ID")
+TAGS=("node0")
+# 域名/SNI 初始留空，后续在菜单中添加
+DOMAIN=""
+SNI=""
 
-#-------------------------
-# 解析参数
-#-------------------------
-while getopts "d:p:h" opt; do
-  case "$opt" in
-    d) DOMAIN="$OPTARG" ;;
-    p) PORT="$OPTARG" ;;
-    h|*) usage ;;
-  esac
-done
-
-#-------------------------
-# 随机标识函数
-#-------------------------
-gen_uuid(){ command -v uuidgen &>/dev/null && uuidgen || head /dev/urandom | tr -dc 'a-f0-9' | head -c8; }
-
-#-------------------------
-# 安装或更新 sing-box
-#-------------------------
-install_singbox(){
-  echo "==> 检测并安装最新稳定版 sing-box ..."
-  LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-    | grep 'browser_download_url.*linux.*amd64\.tar\.gz' | cut -d '"' -f4)
-  TMPDIR=$(mktemp -d)
-  curl -sL "$LATEST_URL" -o "$TMPDIR/sing-box.tar.gz"
-  tar -C "$TMPDIR" -xzf "$TMPDIR/sing-box.tar.gz"
-  if ls "$TMPDIR"/*/sing-box &>/dev/null; then
-    mv "$TMPDIR"/*/sing-box /usr/local/bin/sing-box
-  else
-    mv "$TMPDIR"/sing-box /usr/local/bin/sing-box
-  fi
-  chmod +x /usr/local/bin/sing-box
-  rm -rf "$TMPDIR"
-  echo "--> sing-box 安装完成: $(sing-box version)"
-}
-
-#-------------------------
-# 环境准备
-#-------------------------
-echo "==> 安装系统依赖：curl, jq, qrencode ..."
-apt-get update
-apt-get install -y curl jq qrencode
-
-install_singbox
-
-#-------------------------
-# 生成 UUID 与 Reality 密钥对
-#-------------------------
-UUID=$(gen_uuid)
-echo "==> 生成 Reality 密钥对..."
-# 生成公私钥
-PAIR_OUTPUT=$(sing-box generate reality-keypair)
-PRIVATE_KEY=$(echo "$PAIR_OUTPUT" | awk '/PrivateKey/{print $2}')
-PUBLIC_KEY=$(echo "$PAIR_OUTPUT" | awk '/PublicKey/{print $2}')
-# 生成 short_id（6位十六进制）
-SHORT_ID=$(sing-box generate rand 6 --hex)
-
-#-------------------------
-# 生成配置文件
-#-------------------------
-echo "==> 生成配置文件: $CONFIG_FILE"
-mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" <<EOF
+# —— 写入配置 —— 
+write_config(){
+  cat > /etc/sing-box/config.json <<EOF
 {
-  "log": { "level": "info" },
-  "inbounds": [{
-    "type": "vless",
-    "tag": "$NODE_PROTOCOL",
-    "listen": "0.0.0.0",
-    "listen_port": $PORT,
-    "sniff": true,
-    "decryption": "none",
-    "clients": [{
-      "uuid": "$UUID",
-      "flow": "xtls-rprx-vision",
-      "reality": {
-        "handshake": "x25519",
-        "private_key": "$PRIVATE_KEY",
-        "public_key": "$PUBLIC_KEY",
-        "short_id": "$SHORT_ID",
-        "max_time": 86400
+  "log": {"level":"info","output":"file","log_file":"/var/log/sing-box/sing-box.log"},
+  "dns":{"servers":["8.8.8.8","1.1.1.1"],"disable_udp":false},
+  "inbounds":[
+EOF
+  for i in "${!UUIDs[@]}"; do
+    cat >> /etc/sing-box/config.json <<EOF
+    {
+      "tag":"${TAGS[i]}",
+      "type":"vless",
+      "listen":"::",
+      "listen_port":${PORTs[i]},
+      "users":[{"uuid":"${UUIDs[i]}","flow":"xtls-rprx-vision"}],
+      "tls":{
+        "enabled":true,
+        "reality":{
+          "enabled":true,
+          "handshake":${DOMAIN:+{"server":"$SNI","server_port":443}},
+          "private_key":"$PRIVATE_KEY",
+          "short_id":["${SIDs[i]}"]
+        },
+        "server_name":"${SNI}"
       }
-    }]
-  }],
-  "outbounds": [{ "type": "direct", "tag": "direct" }]
+    }$( [ $i -lt $((${#UUIDs[@]}-1)) ] && echo "," )
+EOF
+  done
+  cat >> /etc/sing-box/config.json <<EOF
+  ],
+  "outbounds":[{"type":"direct"}]
 }
 EOF
+}
 
-#-------------------------
-# 创建 systemd 服务
-#-------------------------
-echo "==> 创建 systemd 服务: $SERVICE_FILE"
-cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=sing-box service
-After=network.target
+# —— 第一次写配置 & 启动 —— 
+write_config
+systemctl enable --now sing-box
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/sing-box run -c $CONFIG_FILE
-Restart=on-failure
+# —— 生成二维码文件 —— 
+for u in "${UUIDs[@]}"; do
+  url="vless://${u}@${DOMAIN}:${PORTs[0]}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SIDs[0]}"
+  QRURLS+=("$url")
+done
+qrencode -o /root/vless_reality.png "${QRURLS[0]}"
 
-[Install]
-WantedBy=multi-user.target
+# —— 创建管理脚本 sb —— 
+cat > /usr/local/bin/sb <<'EOF'
+#!/bin/bash
+set -e
+
+# 从安装时注入
+UUIDs=(__UUIDS__)
+PORTs=(__PORTs__)
+SIDs=(__SIDs__)
+TAGS=(__TAGS__)
+DOMAIN="__DOMAIN__"
+SNI="__SNI__"
+QRURLS=(__QRURLS__)
+PUBLIC_KEY="__PUBLIC_KEY__"
+
+# 重写配置函数
+write_config(){
+  cat > /etc/sing-box/config.json <<EOC
+{
+  "log": {"level":"info","output":"file","log_file":"/var/log/sing-box/sing-box.log"},
+  "dns":{"servers":["8.8.8.8","1.1.1.1"],"disable_udp":false},
+  "inbounds":[
+EOC
+  for i in "${!UUIDs[@]}"; do
+    cat >> /etc/sing-box/config.json <<EOC
+    {
+      "tag":"${TAGS[i]}",
+      "type":"vless",
+      "listen":"::",
+      "listen_port":${PORTs[i]},
+      "users":[{"uuid":"${UUIDs[i]}","flow":"xtls-rprx-vision"}],
+      "tls":{
+        "enabled":true,
+        "reality":{
+          "enabled":true,
+          $( [ -n "$DOMAIN" ] && echo "\"handshake\":{\"server\":\"$SNI\",\"server_port\":443\"," )
+          "private_key":"$PRIVATE_KEY",
+          "short_id":["${SIDs[i]}"]
+        },
+        "server_name":"$SNI"
+      }
+    }$( [ $i -lt $((${#UUIDs[@]}-1)) ] && echo "," )
+EOC
+  done
+  cat >> /etc/sing-box/config.json <<EOC
+  ],
+  "outbounds":[{"type":"direct"}]
+}
+EOC
+}
+
+show_info(){
+  clear
+  echo "📋 节点信息："
+  for i in "${!UUIDs[@]}"; do
+    echo " [$i] ${TAGS[i]} UUID:${UUIDs[i]} 端口:${PORTs[i]} SID:${SIDs[i]}"
+  done
+  echo "域名: $DOMAIN  SNI: $SNI"
+  echo "订阅链接："; printf "%s\n" "${QRURLS[@]}"
+  echo; systemctl status sing-box|grep Active
+  echo "日志：/var/log/sing-box/sing-box.log"
+  echo "二维码：/root/vless_reality.png"
+}
+
+show_qr(){
+  for u in "${QRURLS[@]}"; do qrencode -t ANSIUTF8 "$u"; done
+}
+
+update_sb(){
+  echo "🔄 更新 sing-box…"
+  bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
+  echo "✅ 更新完成"
+}
+
+change_domain(){
+  read -p "新域名: " nd
+  DOMAIN="$nd"; SNI="$nd"
+  write_config; systemctl restart sing-box
+  echo "✅ 域名更新为 $DOMAIN"
+}
+
+delete_domain(){
+  read -p "确定删除域名？(Y/n) " c
+  [[ $c =~ ^[Yy]$ ]] && DOMAIN="" && SNI="" && write_config && systemctl restart sing-box && echo "✅ 域名已删除"
+}
+
+add_config(){
+  echo "选择协议:"; select p in VLESS Trojan VMess Shadowsocks Cancel; do
+    [ "$p" = Cancel ] && return
+    NU=$(uuidgen); NS=$(head -c4 /dev/urandom|xxd -p)
+    read -p "新端口: " np
+    UUIDs+=("$NU"); PORTs+=("$np"); SIDs+=("$NS"); TAGS+=("$p-$NS")
+    url="vless://${NU}@${DOMAIN}:${np}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${NS}"
+    QRURLS+=("$url")
+    write_config; systemctl restart sing-box
+    echo "✅ 添加节点 $p, tag=${TAGS[-1]}"
+    break
+  done
+}
+
+change_port(){
+  show_info
+  read -p "选择节点编号: " idx
+  read -p "新端口: " np
+  if ss -tunlp|grep -q ":$np"; then echo "❌ 端口 $np 占用"; return; fi
+  PORTs[$idx]=$np
+  write_config; systemctl restart sing-box
+  echo "✅ 节点 $idx 端口改为 $np"
+}
+
+rename_node(){
+  show_info
+  read -p "选择节点编号: " idx
+  read -p "新标签: " nn
+  TAGS[$idx]="$nn"
+  write_config; systemctl restart sing-box
+  echo "✅ 节点 $idx 新标签: $nn"
+}
+
+open_ports(){
+  echo "放行 80,443 和节点端口…"
+  ports=(80 443 "${PORTs[@]}")
+  iptables -I INPUT -p tcp -m multiport --dports $(IFS=,;echo "${ports[*]}") -j ACCEPT
+  iptables-save
+  echo "✅ 已放行"
+}
+
+gen_sub(){
+  echo "📡 订阅链接："; printf "%s\n" "${QRURLS[@]}"
+  echo "(复制到手机 App 订阅)"
+}
+
+while true; do
+  clear
+  cat <<EOM
+===== Sing-box 管理菜单 =====
+1) 查看节点信息
+2) 生成二维码
+3) 更新 Sing-box
+4) 域名管理
+5) 添加节点配置
+6) 更改端口
+7) 修改节点名称
+8) 放行防火墙端口
+9) 生成订阅链接
+0) 退出
+EOM
+  read -p "选择 [0-9]: " o
+  case $o in
+    1) show_info;;
+    2) show_qr;;
+    3) update_sb;;
+    4) 
+      echo " a) 更改域名"
+      echo " b) 删除域名"
+      read -p "选择 [a/b]: " c
+      [[ $c == a ]] && change_domain
+      [[ $c == b ]] && delete_domain
+      ;;
+    5) add_config;;
+    6) change_port;;
+    7) rename_node;;
+    8) open_ports;;
+    9) gen_sub;;
+    0) exit 0;;
+    *) echo "❌ 无效选项";;
+  esac
+  read -p "回车返回菜单..."
+done
 EOF
 
-systemctl daemon-reload
-echo "==> 启用并启动 sing-box"
-systemctl enable sing-box --now
-
-#-------------------------
-# 安装 sb 管理命令
-#-------------------------
-echo "==> 安装 sb 管理脚本到 /usr/local/bin/sb"
-cat > /usr/local/bin/sb <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-CONFIG_FILE="$CONFIG_FILE"
-DOMAIN="$DOMAIN"
-PORT=$PORT
-NODE_PROTOCOL="$NODE_PROTOCOL"
-SCRIPT_URL="$SCRIPT_URL"
-
-case "\${1:-}" in
-  info)
-    UUID=\$(jq -r '.inbounds[0].clients[0].uuid' \$CONFIG_FILE)
-    PUBK=\$(jq -r '.inbounds[0].clients[0].reality.public_key' \$CONFIG_FILE)
-    SID=\$(jq -r '.inbounds[0].clients[0].reality.short_id' \$CONFIG_FILE)
-    echo "vless://\${UUID}@\${DOMAIN}:\${PORT}?encryption=none&security=reality&pbk=\${PUBK}&sid=\${SID}&flow=xtls-rprx-vision#sky-\${NODE_PROTOCOL,,}-\${DOMAIN}"
-    ;;
-  qr)
-    sb info | awk '/vless:/{print \$1}' | qrencode -t ANSIUTF8
-    ;;
-  update)
-    bash <(curl -sL "\$SCRIPT_URL")
-    ;;
-  *)
-    echo "用法: sb {info|qr|update}"
-    exit 1
-    ;;
-esac
-EOF
+# —— 注入实际变量 —— 
+sed -i -e "s|__UUIDS__|${UUIDs[@]}|g" \
+       -e "s|__PORTs__|${PORTs[@]}|g" \
+       -e "s|__SIDs__|${SIDs[@]}|g" \
+       -e "s|__TAGS__|${TAGS[@]}|g" \
+       -e "s|__DOMAIN__|$DOMAIN|g" \
+       -e "s|__SNI__|$SNI|g" \
+       -e "s|__QRURLS__|${QRURLS[@]}|g" \
+       -e "s|__PUBLIC_KEY__|$PUBLIC_KEY|g" \
+       /usr/local/bin/sb
 
 chmod +x /usr/local/bin/sb
-echo "==> 安装完成！"
-echo "   请运行 'sb info' 查看订阅链接，'sb qr' 生成二维码，'sb update' 更新脚本与程序。"
+
+echo ""
+echo "✅ 安装完成！运行 'sb' 进入管理菜单。"
