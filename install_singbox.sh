@@ -61,16 +61,25 @@ PORT=443
 
 mkdir -p /etc/sing-box
 
+# ========= 更新配置文件 =========
 cat > /etc/sing-box/config.json <<EOF
 {
   "log": {
-    "level": "info",
-    "output": "console"
+    "level": "info",  # 日志级别：debug, info, warn, error
+    "output": "file",  # 控制台输出（console） 或 文件输出（file）
+    "log_file": "/var/log/sing-box/sing-box.log"  # 日志文件路径
+  },
+  "dns": {
+    "servers": [
+      "8.8.8.8",  # Google DNS
+      "1.1.1.1"   # Cloudflare DNS
+    ],
+    "disable_udp": false  # 是否禁用 DNS over UDP
   },
   "inbounds": [
     {
       "type": "vless",
-      "listen": "::",
+      "listen": "::",  # 或者 "0.0.0.0"
       "listen_port": $PORT,
       "users": [
         {
@@ -101,15 +110,14 @@ cat > /etc/sing-box/config.json <<EOF
 }
 EOF
 
+# 启动 sing-box
 echo "🔁 启动 sing-box ..."
 systemctl enable sing-box
 systemctl restart sing-box
 
 VLESS_URL="vless://$UUID@$DOMAIN:$PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID#skydoing-VLESS-REALITY-$DOMAIN"
-qrencode -o /root/vless_reality.png "$VLESS_URL"
 
 # ========= 创建 sb 管理命令 =========
-
 cat > /usr/local/bin/sb <<EOF
 #!/bin/bash
 
@@ -151,12 +159,31 @@ function show_qr() {
   fi
 }
 
-case "\$1" in
-  qr)
-    show_qr ;;
-  *)
-    show_main ;;
-esac
+function update_singbox() {
+  echo -e "${bold_cyan}正在更新 sing-box ...${reset}"
+  bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
+  echo -e "${bold_green}更新完成！${reset}"
+}
+
+function show_menu() {
+  clear
+  echo -e "\${bold_cyan}========== Sing-box 菜单 ==========\${reset}"
+  echo "1) 查看节点信息"
+  echo "2) 生成二维码"
+  echo "3) 更新 Sing-box"
+  echo "4) 退出"
+  echo -n "请输入选项 [1-4]: "
+  read option
+  case "\$option" in
+    1) show_main ;;
+    2) show_qr ;;
+    3) update_singbox ;;
+    4) exit 0 ;;
+    *) echo "无效的选项，请选择 [1-4]" ; show_menu ;;
+  esac
+}
+
+show_menu
 EOF
 
 chmod +x /usr/local/bin/sb
@@ -165,8 +192,5 @@ chmod +x /usr/local/bin/sb
 
 echo ""
 echo "✅ 安装完成！你可以使用以下命令："
-echo "👉  sb        # 查看节点信息"
-echo "👉  sb qr     # 终端显示二维码"
-echo ""
-echo "📌 二维码图片路径：/root/vless_reality.png"
+echo "👉  sb        # 进入菜单"
 echo ""
