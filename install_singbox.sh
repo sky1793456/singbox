@@ -27,10 +27,18 @@ fi
 
 echo "📦 使用包管理器: $PM"
 
-# 安装必要依赖
-echo "📥 安装依赖: curl, openssl, uuidgen, qrencode"
+# 检查是否安装 curl 或 wget
+if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+  echo "❌ curl 和 wget 都未安装，开始安装..."
+  $PM install -y curl wget
+else
+  echo "✅ 找到 curl 或 wget 工具，继续执行"
+fi
+
+# 安装其他必要依赖
+echo "📥 安装依赖: openssl, uuidgen, qrencode"
 $PM update -y
-$PM install -y curl openssl qrencode uuid-runtime coreutils wget
+$PM install -y openssl uuid-runtime qrencode coreutils wget
 
 # ========= 开始部署 =========
 
