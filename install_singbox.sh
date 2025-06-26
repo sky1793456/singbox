@@ -68,7 +68,7 @@ SID0=$(head -c4 /dev/urandom | xxd -p)
 echo "🎲 UUID: $UUID0"
 echo "🆔 Short ID: $SID0"
 
-# --- 初始化配置参数 ---
+# --- 初始化参数 ---
 PROTOS=(vless)
 UUIDS=("$UUID0")
 PORTS=(443)
@@ -115,10 +115,7 @@ for i in "${!UUIDS[@]}"; do
     --argjson hs "$hs" \
     --arg sni "$SNI" \
     '{
-      tag:$tag,
-      type:$type,
-      listen:"0.0.0.0",
-      listen_port:$port,
+      tag:$tag, type:$type, listen:"0.0.0.0", listen_port:$port,
       sniff:{enabled:false},
       users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],
       tls:{
@@ -127,7 +124,6 @@ for i in "${!UUIDS[@]}"; do
         server_name:$sni
       }
     }')
-
   inb=$(jq --argjson x "$entry" '. + [$x]' <<< "$inb")
 done
 
@@ -135,15 +131,27 @@ jq -n \
   --arg logf "/var/log/sing-box/sing-box.log" \
   --arg lvl "$LOG_LEVEL" \
   --argjson inb "$inb" \
-  '{log:{level:$lvl,output:"file",log_file:$logf},dns:{servers:["8.8.8.8","1.1.1.1"],disable_udp:false},inbounds:$inb,outbounds:[{type:"direct"}]}' > /etc/sing-box/config.json
+  '{
+    log:{level:$lvl,output:"file",log_file:$logf},
+    dns:{servers:["8.8.8.8","1.1.1.1"],disable_udp:false},
+    inbounds:$inb,
+    outbounds:[{type:"direct"}]
+  }' > /etc/sing-box/config.json
 WC
 
 chmod +x /etc/sing-box/write_config.sh
 
-# --- 导出环境变量 ---
-export LOG_LEVEL="info" DOMAIN SNI PRIVATE_KEY PROTOS UUIDS PORTS SIDS TAGS
+# --- 导出环境变量，生成配置并启动 ---
+export LOG_LEVEL="info"
+export DOMAIN
+export SNI
+export PRIVATE_KEY
+export PROTOS
+export UUIDS
+export PORTS
+export SIDS
+export TAGS
 
-# --- 生成配置并启动 ---
 bash /etc/sing-box/write_config.sh
 systemctl enable --now sing-box
 
@@ -160,26 +168,24 @@ cat > /etc/logrotate.d/sing-box << 'LR'
 LR
 logrotate --force /etc/logrotate.d/sing-box
 
-# --- 生成订阅链接与二维码 ---
+# --- 生成订阅 & 二维码 ---
 SUBS=()
 for i in "${!UUIDS[@]}"; do
   SUBS+=("vless://${UUIDS[i]}@${DOMAIN:-127.0.0.1}:${PORTS[i]}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SIDS[i]}")
 done
-
 qrencode -o /root/vless_reality.png "${SUBS[0]}"
 
-# --- 生成管理脚本 sb ---
-cat > /usr/local/bin/sb << EOF
+# --- 生成 sb 管理脚本 ---
+cat > /usr/local/bin/sb << 'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 加载配置脚本前的环境变量
+# --- 导入环境 ---
 export LOG_LEVEL="info"
 export DOMAIN="${DOMAIN}"
 export SNI="${SNI}"
 export PRIVATE_KEY="${PRIVATE_KEY}"
 
-# 管理脚本数组
 PROTOS=(${PROTOS[@]})
 UUIDS=(${UUIDS[@]})
 PORTS=(${PORTS[@]})
@@ -188,10 +194,10 @@ TAGS=(${TAGS[@]})
 PUBLIC_KEY="${PUBLIC_KEY}"
 SUBS=(${SUBS[@]})
 
-# 写配置并重启服务
+# 写配置并重启
 source /etc/sing-box/write_config.sh
 
-# 子命令函数
+# 子命令
 node(){ echo "功能开发中..." >&2; }
 domain(){ echo "功能开发中..." >&2; }
 port(){ echo "功能开发中..." >&2; }
@@ -203,7 +209,7 @@ qr(){ for u in "${SUBS[@]}"; do qrencode -t ANSIUTF8 "$u"; done; }
 sub(){ printf "%s\n" "${SUBS[@]}"; }
 uninstall(){ echo "功能开发中..." >&2; }
 
-# 加载扩展脚本
+# 加载扩展
 for ext in /usr/local/lib/singbox-extensions/*.sh; do
   [[ -r $ext ]] && source "$ext"
 done
