@@ -2,30 +2,44 @@
 #==================================================
 #  Sing-box + VLESS + REALITY 一键安装与管理脚本
 #  节点命名：sky+协议名+域名
-#  功能：
-#    - 安装或升级到最新稳定版 sing-box
-#    - 自动生成 UUID, Reality 密钥对, short ID
-#    - 自动生成完整 config.json
-#    - 创建 systemd 服务
-#    - 安装依赖 jq, qrencode 并实现 sb 管理命令：
-#        sb info   -> 查看节点 URL
-#        sb qr     -> 生成并显示节点二维码
-#        sb update -> 更新并重跑安装脚本
+#
+#  使用：
+#    bash install_singbox.sh [-d DOMAIN] [-p PORT]
 #==================================================
 
 set -euo pipefail
 
 #-------------------------
-# 配置变量（请根据实际修改）
+# 默认配置，可被 -d/-p 覆盖
 #-------------------------
 NODE_PROTOCOL="VLESS-REALITY"
-DOMAIN="your.domain.com"       # 替换成你的域名或 IP
+DOMAIN="your.domain.com"
 PORT=443
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 SERVICE_FILE="/etc/systemd/system/sing-box.service"
-# 原始脚本下载地址（用于 sb update）
 SCRIPT_URL="https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh"
+
+usage(){
+  cat <<EOF
+用法：$(basename $0) [-d domain] [-p port]
+
+  -d 域名或 IP（默认：$DOMAIN）
+  -p 监听端口   （默认：$PORT）
+EOF
+  exit 1
+}
+
+#-------------------------
+# 解析参数
+#-------------------------
+while getopts "d:p:h" opt; do
+  case "$opt" in
+    d) DOMAIN="$OPTARG" ;;
+    p) PORT="$OPTARG" ;;
+    h|*) usage ;;
+  esac
+done
 
 #-------------------------
 # 生成随机标识函数
@@ -43,7 +57,6 @@ install_singbox(){
   TMPDIR=$(mktemp -d)
   curl -sL "$LATEST_URL" -o "$TMPDIR/sing-box.tar.gz"
   tar -C "$TMPDIR" -xzf "$TMPDIR/sing-box.tar.gz"
-  # 尝试移动二进制: 支持多层目录
   if ls "$TMPDIR"/*/sing-box >/dev/null 2>&1; then
     mv "$TMPDIR"/*/sing-box /usr/local/bin/sing-box
   else
@@ -57,7 +70,7 @@ install_singbox(){
 #-------------------------
 # 环境准备
 #-------------------------
-echo "==> 安装系统依赖: curl, jq, qrencode ..."
+echo "==> 安装系统依赖：curl, jq, qrencode ..."
 apt-get update
 apt-get install -y curl jq qrencode
 
@@ -78,7 +91,7 @@ PUBLIC_KEY=$(echo "$KEY_JSON" | jq -r '.public_key')
 #-------------------------
 echo "==> 生成配置文件: $CONFIG_FILE"
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" << EOF
+cat > "$CONFIG_FILE" <<EOF
 {
   "log": { "level": "info" },
   "inbounds": [{
@@ -108,7 +121,7 @@ EOF
 # 创建 systemd 服务
 #-------------------------
 echo "==> 创建 systemd 服务: $SERVICE_FILE"
-cat > "$SERVICE_FILE" << EOF
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=sing-box service
 After=network.target
@@ -123,30 +136,29 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-echo "==> 执行：systemctl enable sing-box && systemctl restart sing-box"
-systemctl enable sing-box && systemctl restart sing-box
-
-echo "==> sing-box 已启动并开机自启"
+echo "==> 启用并启动 sing-box："
+systemctl enable sing-box --now
 
 #-------------------------
 # 安装 sb 管理命令
 #-------------------------
 echo "==> 安装 sb 管理脚本到 /usr/local/bin/sb"
-cat > /usr/local/bin/sb << EOF
+cat > /usr/local/bin/sb <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-CONFIG_FILE="$CONFIG_FILE"
 
-case "\${1:-}" in
+CONFIG_FILE="/etc/sing-box/config.json"
+
+case "${1:-}" in
   info)
-    UUID=\$(jq -r '.inbounds[0].clients[0].uuid' \$CONFIG_FILE)
-    PUBK=\$(jq -r '.inbounds[0].clients[0].reality.public_key' \$CONFIG_FILE)
-    SID=\$(jq -r '.inbounds[0].clients[0].reality.short_id' \$CONFIG_FILE)
-    URL="vless://\${UUID}@\${DOMAIN}:\${PORT}?encryption=none&security=reality&pbk=\${PUBK}&sid=\${SID}&flow=xtls-rprx-vision#sky-\${NODE_PROTOCOL,,}-\${DOMAIN}"
-    echo "节点 URL: \$URL"
+    UUID=$(jq -r '.inbounds[0].clients[0].uuid' $CONFIG_FILE)
+    PUBK=$(jq -r '.inbounds[0].clients[0].reality.public_key' $CONFIG_FILE)
+    SID=$(jq -r '.inbounds[0].clients[0].reality.short_id' $CONFIG_FILE)
+    URL="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&pbk=${PUBK}&sid=${SID}&flow=xtls-rprx-vision#sky-${NODE_PROTOCOL,,}-${DOMAIN}"
+    echo "节点 URL: $URL"
     ;;
   qr)
-    sb info | awk -F": " '{print \$2}' | qrencode -t ANSIUTF8
+    sb info | awk -F": " '{print $2}' | qrencode -t ANSIUTF8
     ;;
   update)
     bash <(curl -sL "$SCRIPT_URL")
@@ -159,4 +171,4 @@ esac
 EOF
 
 chmod +x /usr/local/bin/sb
-echo "==> 安装完成！使用 'sb info' 查看节点信息，'sb qr' 显示二维码，'sb update' 更新程序。"
+echo "==> 安装完成！使用 'sb info' 查看链接，'sb qr' 生成二维码，'sb update' 更新脚本和程序。"
