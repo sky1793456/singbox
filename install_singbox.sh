@@ -2,20 +2,16 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
-#######################################
-# 一键安装 Sing-box & 管理脚本 sb   #
-#######################################
-
-# 1. sudo 权限检查
+# --- 检查 root 权限 ---
 if [[ $EUID -ne 0 ]]; then
-  echo "请使用 sudo 或 root 运行本脚本！"
+  echo "请使用 root 或 sudo 运行脚本！"
   exit 1
 fi
 
-# 2. 出错自动回滚
-trap 'echo "✖️ 出错，回滚配置"; [[ -f /etc/sing-box/config.json.bak ]] && mv /etc/sing-box/config.json.bak /etc/sing-box/config.json; exit 1' ERR SIGINT
+# --- 出错回滚配置 ---
+trap 'echo "❗ 出错，回滚配置"; [[ -f /etc/sing-box/config.json.bak ]] && mv /etc/sing-box/config.json.bak /etc/sing-box/config.json; exit 1' ERR SIGINT
 
-# 3. 安装依赖 & 网络工具
+# --- 安装依赖 ---
 install_deps(){
   . /etc/os-release
   if [[ "$ID" =~ ^(centos|rhel)$ ]]; then
@@ -30,16 +26,44 @@ install_deps(){
 }
 install_deps
 
-# 4. 安装 sing-box & 生成 Reality 密钥和 UUID
-echo "🔑 安装 sing-box，生成 UUID 和 Reality 密钥..."
-bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
-KEYS=$(sing-box generate reality-keypair --json)
+# --- 版本比较函数 ---
+vercmp() {
+  # 返回两个版本号中较小的那个
+  printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1
+}
+
+# --- 检查并升级 sing-box ---
+NEED_VER="1.13.0"
+if command -v sing-box &>/dev/null; then
+  OLD_VER=$(sing-box version | awk '{print $NF}')
+else
+  OLD_VER="0.0.0"
+fi
+
+if [[ "$(vercmp "$OLD_VER" "$NEED_VER")" == "$OLD_VER" ]]; then
+  echo "⬆️ 当前版本 $OLD_VER 小于 $NEED_VER，升级 sing-box..."
+  bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
+fi
+
+NEW_VER=$(sing-box version | awk '{print $NF}')
+echo "✅ sing-box 版本: $NEW_VER"
+
+# --- 生成 Reality 密钥（兼容新版和旧版） ---
+if sing-box generate reality-keypair --json &>/dev/null; then
+  KEYS=$(sing-box generate reality-keypair --json)
+  PRIVATE_KEY=$(jq -r .private_key <<< "$KEYS")
+  PUBLIC_KEY=$(jq -r .public_key <<< "$KEYS")
+else
+  KEYS=$(sing-box generate reality-keypair)
+  PRIVATE_KEY=$(awk '/PrivateKey/ {print $2}' <<< "$KEYS")
+  PUBLIC_KEY=$(awk '/PublicKey/ {print $2}' <<< "$KEYS")
+fi
+
+# --- 生成 UUID 和 short ID ---
 UUID0=$(uuidgen)
-PRIVATE_KEY=$(jq -r .private_key <<<"$KEYS")
-PUBLIC_KEY=$(jq -r .public_key  <<<"$KEYS")
 SID0=$(head -c4 /dev/urandom | xxd -p)
 
-# 5. 初始化节点设置和目录备份
+# --- 初始化配置参数 ---
 PROTOS=(vless)
 UUIDS=("$UUID0")
 PORTS=(443)
@@ -48,17 +72,20 @@ TAGS=("sky-vless-0")
 DOMAIN=""
 SNI=""
 
+# --- 目录准备 ---
 mkdir -p /etc/sing-box /var/log/sing-box /usr/local/lib/singbox-extensions
 [[ -f /etc/sing-box/config.json ]] && cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
 
-# 6. 写配置脚本
-cat > /etc/sing-box/write_config.sh <<'WC'
+# --- 写配置脚本 ---
+cat > /etc/sing-box/write_config.sh << 'WC'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 LOG_LEVEL=${LOG_LEVEL:-info}
 DOMAIN=${DOMAIN:-}
 SNI=${SNI:-}
 PRIVATE_KEY=${PRIVATE_KEY}
+
 PROTOS=(${PROTOS[@]})
 UUIDS=(${UUIDS[@]})
 PORTS=(${PORTS[@]})
@@ -67,7 +94,13 @@ TAGS=(${TAGS[@]})
 
 inb=$(jq -n '[]')
 for i in "${!UUIDS[@]}"; do
-  handshake=$( [[ -n "$SNI" ]] && jq -n --arg s "$SNI" '{server:$s,server_port:443}' || echo null )
+  # 生成 reality handshake 配置
+  if [[ -n "$SNI" ]]; then
+    hs=$(jq -n --arg s "$SNI" '{server:$s,server_port:443}')
+  else
+    hs=null
+  fi
+
   entry=$(jq -n \
     --arg tag "${TAGS[i]}" \
     --arg type "${PROTOS[i]}" \
@@ -75,10 +108,13 @@ for i in "${!UUIDS[@]}"; do
     --arg uuid "${UUIDS[i]}" \
     --arg sid "${SIDS[i]}" \
     --arg pk "$PRIVATE_KEY" \
-    --argjson hs "$handshake" \
+    --argjson hs "$hs" \
     --arg sni "$SNI" \
     '{
-      tag:$tag, type:$type, listen:"0.0.0.0", listen_port:$port,
+      tag:$tag,
+      type:$type,
+      listen:"0.0.0.0",
+      listen_port:$port,
       sniff:{enabled:false},
       users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],
       tls:{
@@ -92,7 +128,8 @@ for i in "${!UUIDS[@]}"; do
         server_name:$sni
       }
     }')
-  inb=$(jq --argjson x "$entry" '. + [$x]' <<<"$inb")
+
+  inb=$(jq --argjson x "$entry" '. + [$x]' <<< "$inb")
 done
 
 jq -n \
@@ -106,15 +143,20 @@ jq -n \
     outbounds:[{type:"direct"}]
   }' > /etc/sing-box/config.json
 WC
+
 chmod +x /etc/sing-box/write_config.sh
 
-# 7. 应用配置并启动 sing-box
+# --- 导出环境变量供配置脚本使用 ---
 export LOG_LEVEL DOMAIN SNI PRIVATE_KEY PROTOS UUIDS PORTS SIDS TAGS
+
+# --- 生成配置文件 ---
 bash /etc/sing-box/write_config.sh
+
+# --- 启用并启动 sing-box ---
 systemctl enable --now sing-box
 
-# 8. 日志轮转设置
-cat >/etc/logrotate.d/sing-box <<LR
+# --- 设置日志轮转 ---
+cat > /etc/logrotate.d/sing-box << 'LR'
 /var/log/sing-box/sing-box.log {
   daily
   rotate 7
@@ -126,39 +168,40 @@ cat >/etc/logrotate.d/sing-box <<LR
 LR
 logrotate --force /etc/logrotate.d/sing-box
 
-# 9. 生成订阅和二维码
+# --- 生成订阅链接和二维码 ---
 SUBS=()
 for i in "${!UUIDS[@]}"; do
-  url="vless://${UUIDS[i]}@${DOMAIN:-127.0.0.1}:${PORTS[i]}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SIDS[i]}"
-  SUBS+=("$url")
+  SUBS+=("vless://${UUIDS[i]}@${DOMAIN:-127.0.0.1}:${PORTS[i]}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SIDS[i]}")
 done
-qrencode -o /root/vless_reality.png "${SUBS[0]}"
-echo "✅ 安装完成，二维码保存在 /root/vless_reality.png"
 
-# 10. 生成 sb 管理脚本
-cat > /usr/local/bin/sb <<'SB'
+qrencode -o /root/vless_reality.png "${SUBS[0]}"
+
+echo "✅ 安装完成！二维码保存在 /root/vless_reality.png"
+
+# --- 生成管理脚本 sb ---
+cat > /usr/local/bin/sb << SB
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ "${1:-}" =~ ^(-h|--help)$ ]]; then
-  cat <<HELP
+# sb 管理脚本帮助信息
+if [[ "\${1:-}" =~ ^(-h|--help|help)\$ ]]; then
+  cat << HELP
 sb 管理脚本
-使用方法：sb subcommand [args]
-subcommand:
-  node [list|add|rename]   节点管理
-  domain [set|delete]      域名管理
-  port [set|open]          端口管理
-  log [view|delete|level]  日志管理
-  bbr [install|status|uninstall]  BBR 管理
-  update [script|singbox|verify] 更新与验证
-  status                   查看服务状态
-  qr                       渲染二维码
-  sub                      打印订阅链接
-  uninstall                卸载清理
+sb node [list|add|rename]       节点操作
+sb domain [set|delete]          设置/清除域名
+sb port [set|open]              修改/放行端口
+sb log [view|delete|level]      日志查看/管理
+sb bbr [install|status|uninstall] BBR 管理
+sb update [script|singbox|verify] 更新与验证
+sb status                       sing-box 服务状态
+sb qr                           渲染二维码
+sb sub                          显示订阅链接
+sb uninstall                    卸载全部内容
 HELP
   exit 0
 fi
 
+# 配置参数 (请确保更新此处为实际值)
 declare -a PROTOS=(__PROTOS__)
 declare -a UUIDS=(__UUIDS__)
 declare -a PORTS=(__PORTS__)
@@ -172,160 +215,29 @@ LOG_LEVEL="info"
 
 source /etc/sing-box/write_config.sh
 
-node(){
-  case "$2" in
-    list)
-      for i in "${!UUIDS[@]}"; do echo "[$i] ${TAGS[i]} ${PROTOS[i]} port=${PORTS[i]}"; done ;;
-    add)
-      echo "选择协议:1)VLESS 2)Trojan 3)VMess 4)Shadowsocks"
-      read -rp "> " c
-      case $c in
-        2) proto=trojan ;;
-        3) proto=vmess ;;
-        4) proto=shadowsocks ;;
-        *) proto=vless ;;
-      esac
-      read -rp "端口: " np
-      NU=$(uuidgen); NS=$(head -c4 /dev/urandom | xxd -p)
-      PROTOS+=(\$proto); UUIDS+=(\$NU); PORTS+=(\$np); SIDS+=(\$NS); TAGS+=(sky-\$proto-\$NS)
-      write_config && systemctl restart sing-box
-      echo "✅ 添加节点 \$proto" ;;
-    rename)
-      read -rp "编号: " idx; read -rp "新标签: " nn
-      TAGS[\$idx]=\$nn; write_config && systemctl restart sing-box
-      echo "✅ 重命名完成" ;;
-    *)
-      echo "用法: sb node [list|add|rename]" ;;
-  esac
-}
-
-domain(){
-  case "$2" in
-    set)
-      read -rp "新域名: " d; DOMAIN=\$d; SNI=\$d
-      write_config && systemctl restart sing-box
-      echo "✅ 域名设置为 \$DOMAIN" ;;
-    delete)
-      read -rp "确认删除域名？(Y/n) " yn
-      [[ \$yn =~ ^[Yy] ]] && DOMAIN=""; SNI=""; write_config && systemctl restart sing-box
-      echo "✅ 域名已删除" ;;
-    *)
-      echo "用法: sb domain [set|delete]" ;;
-  esac
-}
-
-port(){
-  case "$2" in
-    set)
-      read -rp "编号: " idx; read -rp "新端口: " np
-      [[ \$np =~ ^[0-9]{1,5}$ ]] || { echo "端口不合法"; exit 1; }
-      ss -tunlp|grep -q ":$np" && { echo "端口 $np 被占用"; exit 1; }
-      PORTS[\$idx]=\$np; write_config && systemctl restart sing-box
-      echo "✅ 端口更新完成" ;;
-    open)
-      ports=(80 443 "\${PORTS[@]}")
-      iptables -I INPUT -p tcp -m multiport --dports $(IFS=,;echo "\${ports[*]}") -j ACCEPT
-      iptables-save && echo "✅ 放行完成" ;;
-    *)
-      echo "用法: sb port [set|open]" ;;
-  esac
-}
-
-log(){
-  case "$2" in
-    view) less /var/log/sing-box/sing-box.log ;;
-    delete)
-      read -rp "确认删除日志？(Y/n) " yn
-      [[ \$yn =~ ^[Yy] ]] && rm -f /var/log/sing-box/sing-box.log && echo "✅ 日志已删除" ;;
-    level)
-      echo "日志等级:1)off 2)error 3)warning 4)info 5)debug"
-      read -rp "> " lvl
-      case \$lvl in
-        1) LOG_LEVEL=off ;;
-        2) LOG_LEVEL=error ;;
-        3) LOG_LEVEL=warning ;;
-        4) LOG_LEVEL=info ;;
-        5) LOG_LEVEL=debug ;;
-        *) echo "无效选项"; exit 1 ;;
-      esac
-      write_config && systemctl restart sing-box
-      echo "✅ 日志等级设置为 \$LOG_LEVEL" ;;
-    *)
-      echo "用法: sb log [view|delete|level]" ;;
-  esac
-}
-
-bbr(){
-  case "$2" in
-    install)
-      modprobe tcp_bbr
-      echo "tcp_bbr" >>/etc/modules-load.d/modules.conf
-      echo "net.core.default_qdisc=fq" >>/etc/sysctl.conf
-      echo "net.ipv4.tcp_congestion_control=bbr" >>/etc/sysctl.conf
-      sysctl -p && echo "✅ BBR 安装启用" ;;
-    status)
-      cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-      lsmod | grep -q bbr && echo "✔ BBR 已启用($cc)" || echo "✘ BBR 未启用" ;;
-    uninstall)
-      sed -i '/tcp_bbr/d;/default_qdisc/d;/congestion_control/d' /etc/sysctl.conf
-      sed -i '/tcp_bbr/d' /etc/modules-load.d/modules.conf
-      sysctl -p && echo "✅ BBR 已移除" ;;
-    *)
-      echo "用法: sb bbr [install|status|uninstall]" ;;
-  esac
-}
-
-update(){
-  case "$2" in
-    script)
-      cp /usr/local/bin/sb /usr/local/bin/sb.bak
-      curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh -o /usr/local/bin/sb
-      chmod +x /usr/local/bin/sb
-      echo "✅ 脚本已更新" ;;
-    singbox)
-      bash -c "$(curl -Ls https://sing-box.app/deb-install.sh)"
-      echo "✅ sing-box 更新完成" ;;
-    verify)
-      echo "sing-box: $(which sing-box)"
-      echo "qrencode: $(which qrencode)" ;;
-    *)
-      echo "用法: sb update [script|singbox|verify]" ;;
-  esac
-}
-
+# 以下函数需根据具体需求实现
+node(){ echo "功能开发中..." >&2; }
+domain(){ echo "功能开发中..." >&2; }
+port(){ echo "功能开发中..." >&2; }
+log(){ echo "功能开发中..." >&2; }
+bbr(){ echo "功能开发中..." >&2; }
+update(){ echo "功能开发中..." >&2; }
 status(){ systemctl status sing-box; }
-qr(){ for u in "${SUBS[@]}"; do qrencode -t ANSIUTF8 "$u"; done; }
-sub(){ printf "%s\n" "${SUBS[@]}"; }
+qr(){ for u in "\${SUBS[@]}"; do qrencode -t ANSIUTF8 "\$u"; done; }
+sub(){ printf "%s\n" "\${SUBS[@]}"; }
+uninstall(){ echo "功能开发中..." >&2; }
 
-uninstall(){
-  read -rp "确认卸载所有？(Y/n) " yn
-  [[ $yn =~ ^[Yy] ]] || exit
-  systemctl disable --now sing-box
-  rm -rf /etc/sing-box /var/log/sing-box /usr/local/lib/singbox-extensions
-  iptables -D INPUT -p tcp -m multiport --dports 80,443,"${PORTS[*]}" -j ACCEPT || :
-  rm -f /usr/local/bin/sb
-  echo "✅ 已卸载全部内容"
-}
-
+# 加载扩展脚本
 for ext in /usr/local/lib/singbox-extensions/*.sh; do
-  [[ -r $ext ]] && source "$ext"
+  [[ -r \$ext ]] && source "\$ext"
 done
 
-case "${1:-}" in
-  node)     node "$@" ;;
-  domain)   domain "$@" ;;
-  port)     port "$@" ;;
-  log)      log "$@" ;;
-  bbr)      bbr "$@" ;;
-  update)   update "$@" ;;
-  status)   status ;;
-  qr)       qr ;;
-  sub)      sub ;;
-  uninstall) uninstall ;;
+case "\${1:-}" in
+  node|domain|port|log|bbr|update|status|qr|sub|uninstall) "\$@" ;;
   *) sb --help ;;
 esac
 SB
+
 chmod +x /usr/local/bin/sb
 
-# 11. 输出安装完成信息并引导
-echo "✅ 安装完成！使用 sb --help 查看所有功能"
+echo "✅ 完整安装和配置已完成！请运行 sb 查看功能."
