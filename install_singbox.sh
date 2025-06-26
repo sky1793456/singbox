@@ -42,10 +42,9 @@ while getopts "d:p:h" opt; do
 done
 
 #-------------------------
-# 生成随机标识函数
+# 随机标识函数
 #-------------------------
-gen_uuid(){ command -v uuidgen >/dev/null 2>&1 && uuidgen || head /dev/urandom | tr -dc 'a-f0-9' | head -c8; }
-gen_shortid(){ head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c6; }
+gen_uuid(){ command -v uuidgen &>/dev/null && uuidgen || head /dev/urandom | tr -dc 'a-f0-9' | head -c8; }
 
 #-------------------------
 # 安装或更新 sing-box
@@ -57,7 +56,7 @@ install_singbox(){
   TMPDIR=$(mktemp -d)
   curl -sL "$LATEST_URL" -o "$TMPDIR/sing-box.tar.gz"
   tar -C "$TMPDIR" -xzf "$TMPDIR/sing-box.tar.gz"
-  if ls "$TMPDIR"/*/sing-box >/dev/null 2>&1; then
+  if ls "$TMPDIR"/*/sing-box &>/dev/null; then
     mv "$TMPDIR"/*/sing-box /usr/local/bin/sing-box
   else
     mv "$TMPDIR"/sing-box /usr/local/bin/sing-box
@@ -77,14 +76,16 @@ apt-get install -y curl jq qrencode
 install_singbox
 
 #-------------------------
-# 生成标识与 Reality 密钥对
+# 生成 UUID 与 Reality 密钥对
 #-------------------------
 UUID=$(gen_uuid)
-SHORT_ID=$(gen_shortid)
 echo "==> 生成 Reality 密钥对..."
-KEY_JSON=$(sing-box reality generate-key)
-PRIVATE_KEY=$(echo "$KEY_JSON" | jq -r '.private_key')
-PUBLIC_KEY=$(echo "$KEY_JSON" | jq -r '.public_key')
+# 生成公私钥
+PAIR_OUTPUT=$(sing-box generate reality-keypair)
+PRIVATE_KEY=$(echo "$PAIR_OUTPUT" | awk '/PrivateKey/{print $2}')
+PUBLIC_KEY=$(echo "$PAIR_OUTPUT" | awk '/PublicKey/{print $2}')
+# 生成 short_id（6位十六进制）
+SHORT_ID=$(sing-box generate rand 6 --hex)
 
 #-------------------------
 # 生成配置文件
@@ -136,32 +137,35 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-echo "==> 启用并启动 sing-box："
+echo "==> 启用并启动 sing-box"
 systemctl enable sing-box --now
 
 #-------------------------
 # 安装 sb 管理命令
 #-------------------------
 echo "==> 安装 sb 管理脚本到 /usr/local/bin/sb"
-cat > /usr/local/bin/sb <<'EOF'
+cat > /usr/local/bin/sb <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_FILE="/etc/sing-box/config.json"
+CONFIG_FILE="$CONFIG_FILE"
+DOMAIN="$DOMAIN"
+PORT=$PORT
+NODE_PROTOCOL="$NODE_PROTOCOL"
+SCRIPT_URL="$SCRIPT_URL"
 
-case "${1:-}" in
+case "\${1:-}" in
   info)
-    UUID=$(jq -r '.inbounds[0].clients[0].uuid' $CONFIG_FILE)
-    PUBK=$(jq -r '.inbounds[0].clients[0].reality.public_key' $CONFIG_FILE)
-    SID=$(jq -r '.inbounds[0].clients[0].reality.short_id' $CONFIG_FILE)
-    URL="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&pbk=${PUBK}&sid=${SID}&flow=xtls-rprx-vision#sky-${NODE_PROTOCOL,,}-${DOMAIN}"
-    echo "节点 URL: $URL"
+    UUID=\$(jq -r '.inbounds[0].clients[0].uuid' \$CONFIG_FILE)
+    PUBK=\$(jq -r '.inbounds[0].clients[0].reality.public_key' \$CONFIG_FILE)
+    SID=\$(jq -r '.inbounds[0].clients[0].reality.short_id' \$CONFIG_FILE)
+    echo "vless://\${UUID}@\${DOMAIN}:\${PORT}?encryption=none&security=reality&pbk=\${PUBK}&sid=\${SID}&flow=xtls-rprx-vision#sky-\${NODE_PROTOCOL,,}-\${DOMAIN}"
     ;;
   qr)
-    sb info | awk -F": " '{print $2}' | qrencode -t ANSIUTF8
+    sb info | awk '/vless:/{print \$1}' | qrencode -t ANSIUTF8
     ;;
   update)
-    bash <(curl -sL "$SCRIPT_URL")
+    bash <(curl -sL "\$SCRIPT_URL")
     ;;
   *)
     echo "用法: sb {info|qr|update}"
@@ -171,4 +175,5 @@ esac
 EOF
 
 chmod +x /usr/local/bin/sb
-echo "==> 安装完成！使用 'sb info' 查看链接，'sb qr' 生成二维码，'sb update' 更新脚本和程序。"
+echo "==> 安装完成！"
+echo "   请运行 'sb info' 查看订阅链接，'sb qr' 生成二维码，'sb update' 更新脚本与程序。"
