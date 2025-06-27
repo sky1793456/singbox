@@ -15,25 +15,50 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+# 识别系统包管理器并安装依赖
+if command -v apt &>/dev/null; then
+  PKG_INSTALL="apt update -y && apt install -y curl wget jq qrencode uuid-runtime iptables"
+elif command -v yum &>/dev/null; then
+  PKG_INSTALL="yum install -y epel-release && yum install -y curl wget jq qrencode uuid iptables"
+else
+  echo "不支持的包管理器，请手动安装 curl, wget, jq, qrencode, uuid-runtime, iptables"
+  exit 1
+fi
+
 echo "[*] 安装依赖..."
-apt update -y
-apt install -y curl wget jq qrencode uuid-runtime iptables
+eval $PKG_INSTALL
 
 echo "[*] 获取最新 Sing-box 版本..."
 ARCH=$(uname -m)
-[[ $ARCH == "x86_64" ]] && ARCH="amd64"
-[[ $ARCH == "aarch64" ]] && ARCH="arm64"
-VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+case "$ARCH" in
+  x86_64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  *) echo "不支持的CPU架构：$ARCH"; exit 1 ;;
+esac
 
-# 下载 URL（使用带 v 前缀的完整版本号）
-DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER}-linux-${ARCH}.tar.gz"
+VER=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+# tag_name形如 v1.11.14
+
+# 去除前导 v
+VER_NO_V=${VER#v}
+
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER_NO_V}-linux-${ARCH}.tar.gz"
+
 echo "[*] 下载：$DOWNLOAD_URL"
+
 mkdir -p /tmp/singbox && cd /tmp/singbox
-curl -fsSL -O "$DOWNLOAD_URL"
+
+if ! curl -fsSL -O "$DOWNLOAD_URL"; then
+  echo "❌ 下载失败，请检查版本号和网络"
+  exit 1
+fi
+
 tar -xzf sing-box-*.tar.gz
+
 install -m 755 sing-box*/sing-box /usr/local/bin/sing-box
 
 echo "[*] 构建配置..."
+
 mkdir -p $CONFIG_DIR/{log,qrcode}
 UUID=$(uuidgen)
 KEYS=$(sing-box generate reality-key)
@@ -74,6 +99,7 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 EOF
 
 echo "[*] 设置 systemd 服务..."
+
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -91,11 +117,15 @@ systemctl daemon-reload
 systemctl enable --now sing-box
 
 echo "[*] 生成节点链接与二维码..."
+
 VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&sni=${SNI}#${TAG}"
+
 echo "$VLESS_URL" > "$URL_PATH"
+
 qrencode -o "$QR_PATH" "$VLESS_URL"
 
 echo "[*] 安装 sb 管理脚本..."
+
 cat > /usr/bin/sb << 'SCRIPT'
 #!/bin/bash
 CONFIG_DIR="/etc/sing-box"
