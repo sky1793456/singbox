@@ -1,7 +1,39 @@
 #!/bin/bash
-# Sing-box VLESS+Reality 一键部署 —— 全自动密钥持久化 & 全部依赖检测
+# Sing-box VLESS+Reality 一键部署 —— 全自动依赖检测 & 密钥持久化
 
 set -euo pipefail
+
+# —— 自动安装 curl / wget —— 
+. /etc/os-release
+OS_ID=$ID
+
+ensure_cmd() {
+  local cmd=$1 pkg=$2
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "[*] 未检测到 $cmd，正在安装…"
+    case "$OS_ID" in
+      ubuntu|debian)
+        apt-get update -y
+        apt-get install -y "$pkg"
+        ;;
+      centos|rhel|almalinux|rocky)
+        if command -v dnf &>/dev/null; then
+          dnf install -y "$pkg"
+        else
+          yum install -y "$pkg"
+        fi
+        ;;
+      *)
+        echo "❌ 不支持的系统，请手动安装 $pkg" >&2
+        exit 1
+        ;;
+    esac
+  fi
+}
+
+ensure_cmd curl curl
+ensure_cmd wget wget
+# —— end 自动安装 curl / wget —— 
 
 # ---------- 常量区 ----------
 CONFIG_DIR="/etc/sing-box"
@@ -23,70 +55,32 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# 2. 检测系统
-. /etc/os-release
-OS_ID=$ID
-echo "[*] 检测到系统：$NAME ($OS_ID) $VERSION_ID"
+# 2. 安装其他依赖
+case "$OS_ID" in
+  ubuntu|debian)
+    apt-get update -y
+    apt-get upgrade -y
+    apt-get install -y jq qrencode uuid-runtime xz-utils iptables xxd
+    ;;
+  centos|rhel|almalinux|rocky)
+    if command -v dnf &>/dev/null; then
+      dnf update -y
+      dnf install -y jq qrencode libuuid iptables-services xz xxd
+    else
+      yum update -y
+      yum install -y jq qrencode libuuid iptables-services xz xxd
+    fi
+    ;;
+esac
 
-# 3. 确保 curl/wget 存在
-ensure_cmd() {
-  local cmd=$1 pkg=$2
-  if ! command -v "$cmd" &>/dev/null; then
-    echo "[*] 安装缺失命令：$cmd"
-    case "$OS_ID" in
-      ubuntu|debian)
-        apt-get update -y
-        apt-get install -y "$pkg"
-        ;;
-      almalinux|rocky|centos|rhel)
-        if command -v dnf &>/dev/null; then
-          dnf install -y "$pkg"
-        else
-          yum install -y "$pkg"
-        fi
-        ;;
-      *)
-        echo "不支持的系统，请手动安装 $pkg" >&2
-        exit 1
-        ;;
-    esac
-  fi
-}
-ensure_cmd curl curl
-ensure_cmd wget wget
-
-# 4. 安装其他依赖
-install_deps() {
-  case "$OS_ID" in
-    ubuntu|debian)
-      apt-get update -y
-      apt-get upgrade -y
-      apt-get install -y jq qrencode uuid-runtime xz-utils iptables xxd
-      ;;
-    almalinux|rocky|centos|rhel)
-      if command -v dnf &>/dev/null; then
-        dnf update -y
-        dnf install -y jq qrencode libuuid iptables-services xz xxd
-      else
-        yum update -y
-        yum install -y jq qrencode libuuid iptables-services xz xxd
-      fi
-      ;;
-    *)
-      echo "不支持的系统：$OS_ID" >&2
-      exit 1
-      ;;
-  esac
-}
-install_deps
-
-# 5. 下载并安装 Sing-box
+# 3. 下载并安装 Sing-box
 echo "[*] 下载并安装 Sing-box..."
 ARCH=$(uname -m)
 [[ $ARCH == "x86_64" ]] && ARCH="amd64"
 [[ $ARCH =~ ^(aarch64|arm64)$ ]] && ARCH="arm64"
+
 read -r VER DOWNLOAD_URL <<EOF
-$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
   | jq -r --arg arch "$ARCH" '
      .tag_name as $v
      | .assets[]
@@ -94,6 +88,7 @@ $(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
      | "\($v) " + .browser_download_url
   ')
 EOF
+
 if [[ -z "$DOWNLOAD_URL" ]]; then
   echo "❌ 未找到匹配架构 $ARCH 的下载链接" >&2
   exit 1
@@ -103,7 +98,7 @@ echo "    → 链接: $DOWNLOAD_URL"
 
 TMP=$(mktemp -d)
 cd "$TMP"
-curl -fsSL -o package "$DOWNLOAD_URL"
+curl -fsSL --retry 3 --retry-delay 5 -o package "$DOWNLOAD_URL"
 if [[ "$DOWNLOAD_URL" == *.tar.gz ]]; then
   tar -xzf package
 elif [[ "$DOWNLOAD_URL" == *.tar.xz ]]; then
@@ -115,31 +110,30 @@ fi
 install -m 755 sing-box*/sing-box "$BIN_PATH"
 cd / && rm -rf "$TMP"
 
-# 校验安装
 if [[ ! -x "$BIN_PATH" ]]; then
-  echo "❌ 未找到 sing-box 二进制：" $BIN_PATH >&2
+  echo "❌ 未找到 sing-box 二进制：$BIN_PATH" >&2
   exit 1
 fi
 
-# 6. 生成 Reality 密钥对并持久化
+# 4. 生成 Reality 密钥对并持久化
 echo "[*] 生成 Reality 密钥对，保存到 $KEY_FILE"
 mkdir -p "$CONFIG_DIR"
 "$BIN_PATH" generate reality-key > "$KEY_FILE" 2>&1
 
-# 7. 提取 PrivateKey/PublicKey/ShortID
-PRIVATE_KEY=$(grep -i 'PrivateKey' "$KEY_FILE" | cut -d':' -f2 | tr -d '[:space:]')
-PUBLIC_KEY=$(grep -i 'PublicKey'  "$KEY_FILE" | cut -d':' -f2 | tr -d '[:space:]')
-SHORT_ID=$(grep -i 'ShortID\|ShortId\|Short_Id' "$KEY_FILE" | cut -d':' -f2 | tr -d '[:space:]')
+# 5. 提取 PrivateKey/PublicKey/ShortID
+PRIVATE_KEY=$(awk -F':' '/PrivateKey/ {gsub(/ /,"",$2); print $2}' "$KEY_FILE")
+PUBLIC_KEY=$(awk -F':' '/PublicKey/  {gsub(/ /,"",$2); print $2}' "$KEY_FILE")
+SHORT_ID=$(awk -F':' '/ShortID|ShortId|Short_Id/ {gsub(/ /,"",$2); print $2}' "$KEY_FILE")
 
 if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" || -z "$SHORT_ID" ]]; then
   echo "❌ 提取密钥失败，请检查 $KEY_FILE" >&2
   exit 1
 fi
 
-# 8. 生成 UUID
+# 6. 生成 UUID
 UUID=$(uuidgen)
 
-# 9. 写入 config.json
+# 7. 写入 config.json
 mkdir -p "$QR_DIR" "$LOG_DIR"
 cat > "$CONFIG_JSON" <<EOF
 {
@@ -160,10 +154,10 @@ cat > "$CONFIG_JSON" <<EOF
 }
 EOF
 
-# 验证 JSON
+# 8. 验证 JSON
 jq . "$CONFIG_JSON" &>/dev/null || { echo "❌ config.json 语法错误"; exit 1; }
 
-# 10. 配置并启动 systemd 服务
+# 9. 配置并启动 systemd 服务
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Sing-box Service
@@ -179,37 +173,40 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl daemon-reload
 systemctl enable --now sing-box
 
-# 11. 生成节点链接与二维码
+# 10. 生成节点链接与二维码
 DOMAIN=$(curl -fsSL https://api.ipify.org)
 VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&sni=www.bing.com#${TAG}"
 echo "$VLESS_URL" > "$URL_PATH"
 qrencode -o "$QR_PATH" "$VLESS_URL"
 
-# 12. 安装 sb 管理脚本
+# 11. 安装 sb 管理脚本
 cat > /usr/bin/sb <<'EOF'
 #!/bin/bash
 set -euo pipefail
+
 CONFIG="/etc/sing-box/config.json"
 URL="/etc/sing-box/qrcode/vless_reality.txt"
-LOG_UNIT="sing-box"
+KEYS="/etc/sing-box/keys.txt"
+UNIT="sing-box"
 
 show_info(){
   echo "UUID:      $(jq -r '.inbounds[0].settings.clients[0].id' $CONFIG)"
   echo "Port:      $(jq -r '.inbounds[0].port' $CONFIG)"
   echo "ShortID:   $(jq -r '.inbounds[0].stream.reality.short_id[0]' $CONFIG)"
-  echo "PublicKey: $(grep -i PublicKey /etc/sing-box/keys.txt | cut -d: -f2-)"
+  echo "PublicKey: $(awk -F':' '/PublicKey/ {print \$2}' $KEYS)"
   echo "SNI:       www.bing.com"
   echo "Link:      $(cat $URL)"
 }
 
 show_link(){ cat $URL; }
 show_qr(){ cat $URL | qrencode -t ansiutf8; }
-show_log(){ journalctl -u $LOG_UNIT -n50 --no-pager; }
-restart(){ systemctl restart $LOG_UNIT && echo "已重启服务"; }
-status(){ systemctl status $LOG_UNIT --no-pager; }
+show_log(){ journalctl -u $UNIT -n50 --no-pager; }
+restart(){ systemctl restart $UNIT && echo "已重启服务"; }
+status(){ systemctl status $UNIT --no-pager; }
 open_port(){
   P=$(jq -r '.inbounds[0].port' $CONFIG)
   iptables -C INPUT -p tcp --dport $P -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $P -j ACCEPT
@@ -244,7 +241,8 @@ MENU
   esac
 done
 EOF
+
 chmod +x /usr/bin/sb
 
-# 13. 完成提示
-echo -e "\n✅ 安装完成！\n运行 → sb 进入管理菜单\n节点链接：$VLESS_URL\n二维码：$QR_PATH"
+# 12. 完成提示
+echo -e "\n✅ 安装完成！\n运行 → sb 进入管理菜单\n节点链接：$VLESS_URL\n二维码路径：$QR_PATH"
