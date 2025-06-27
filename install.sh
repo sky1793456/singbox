@@ -1,9 +1,7 @@
 #!/bin/bash
 
 # sing-box 一键安装脚本（修改版）
-# 主要修复 Reality 密钥生成提取问题
-# 并增加 curl wget 依赖检测和安装
-# 安装完成后自动进入管理菜单
+# 修复 Reality 密钥生成问题，完善依赖安装和服务启动
 
 set -e
 
@@ -41,7 +39,9 @@ mkdir -p "$CONFIG_DIR"
 echo "[*] 获取 Sing-box 最新版本下载链接…"
 LATEST_JSON=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest)
 VERSION=$(echo "$LATEST_JSON" | grep -Po '"tag_name": "\K.*?(?=")')
-DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/$VERSION/sing-box-$VERSION-linux-amd64.tar.gz"
+VERSION_NO_V=${VERSION#v}  # 去掉前缀 v
+
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/$VERSION/sing-box-$VERSION_NO_V-linux-amd64.tar.gz"
 
 echo "    → 版本: $VERSION"
 echo "    → 链接: $DOWNLOAD_URL"
@@ -74,9 +74,7 @@ fi
 echo "$KEY_OUTPUT" > "$KEY_FILE"
 echo "[*] Reality 密钥对已保存到 $KEY_FILE"
 
-# 你可以在这里生成配置文件，启动服务等操作
-# 示例：写入简单配置（根据你的需要替换）
-
+# 写入示例配置文件（请根据实际需求修改）
 cat > "$CONFIG_DIR/config.json" <<EOF
 {
   "inbounds": [],
@@ -91,7 +89,7 @@ EOF
 
 echo "[*] 配置文件已写入 $CONFIG_DIR/config.json"
 
-# 启动 sing-box 服务（示例，需你自己完善 systemd 或其他启动方式）
+# systemd 服务配置并启动
 if command -v systemctl >/dev/null 2>&1; then
   echo "[*] 设置 sing-box 服务开机启动"
   cat >/etc/systemd/system/sing-box.service <<EOF
