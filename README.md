@@ -11,7 +11,7 @@ bash -c "$(curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/main/in
 
 
 
-bash -c "$(curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh)"
+bash <(curl -fsSL https://raw.githubusercontent.com/sky1793456/singbox/refs/heads/main/install.sh)
 
 
 
