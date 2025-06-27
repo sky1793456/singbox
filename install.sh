@@ -1,6 +1,6 @@
 #!/bin/bash
-# 修复版：一键部署 VLESS + Reality，并创建 sb 管理菜单
-# 使用官方稳定版本 sing-box
+# Sing-box VLESS+Reality 一键部署脚本（官方稳定版 v1.11.14）
+# 自动安装依赖，下载 sing-box，生成配置，启动服务，创建管理菜单 sb
 
 set -e
 
@@ -8,99 +8,120 @@ CONFIG_DIR="/etc/sing-box"
 QR_PATH="$CONFIG_DIR/qrcode/vless_reality.png"
 URL_PATH="$CONFIG_DIR/qrcode/vless_reality.txt"
 LOG_PATH="$CONFIG_DIR/log/access.log"
+SERVICE_FILE="/etc/systemd/system/sing-box.service"
+VERSION="v1.11.14"
 
-# 确保以 root 运行
+# 运行检查 root 权限
 if [[ $EUID -ne 0 ]]; then
-  echo "请用 root 运行本脚本！"
+  echo "请使用 root 用户运行本脚本！"
   exit 1
 fi
 
-# 识别系统包管理器并安装依赖
+# 检测系统包管理器
 if command -v apt &>/dev/null; then
-  PKG_INSTALL="apt update -y && apt install -y curl wget jq qrencode uuid-runtime iptables"
+  PKG_INSTALL="apt install -y"
+  PKG_UPDATE="apt update -y"
 elif command -v yum &>/dev/null; then
-  PKG_INSTALL="yum install -y epel-release && yum install -y curl wget jq qrencode uuid iptables"
+  PKG_INSTALL="yum install -y"
+  PKG_UPDATE="yum makecache"
 else
-  echo "不支持的包管理器，请手动安装 curl, wget, jq, qrencode, uuid-runtime, iptables"
+  echo "暂不支持当前操作系统，请手动安装依赖"
   exit 1
 fi
+
+echo "[*] 更新系统包索引..."
+$PKG_UPDATE
 
 echo "[*] 安装依赖..."
-eval $PKG_INSTALL
+$PKG_INSTALL curl wget jq qrencode uuid-runtime iptables iptables-services
 
-echo "[*] 获取最新 Sing-box 版本..."
+# 判断架构
 ARCH=$(uname -m)
-case "$ARCH" in
+case $ARCH in
   x86_64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
-  *) echo "不支持的CPU架构：$ARCH"; exit 1 ;;
+  *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
 
-VER=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-# tag_name形如 v1.11.14
+echo "[*] 下载 sing-box ${VERSION}，架构: $ARCH"
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
 
-# 去除前导 v
-VER_NO_V=${VER#v}
-
-DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER_NO_V}-linux-${ARCH}.tar.gz"
-
-echo "[*] 下载：$DOWNLOAD_URL"
-
-mkdir -p /tmp/singbox && cd /tmp/singbox
-
-if ! curl -fsSL -O "$DOWNLOAD_URL"; then
-  echo "❌ 下载失败，请检查版本号和网络"
-  exit 1
-fi
+mkdir -p /tmp/singbox
+cd /tmp/singbox
+curl -fsSL -O "$DOWNLOAD_URL"
 
 tar -xzf sing-box-*.tar.gz
-
 install -m 755 sing-box*/sing-box /usr/local/bin/sing-box
 
-echo "[*] 构建配置..."
+echo "[*] 清理临时文件..."
+cd ~
+rm -rf /tmp/singbox
 
-mkdir -p $CONFIG_DIR/{log,qrcode}
+echo "[*] 创建配置目录..."
+mkdir -p "$CONFIG_DIR"/{log,qrcode}
+
 UUID=$(uuidgen)
 KEYS=$(sing-box generate reality-key)
 PRIVATE_KEY=$(echo "$KEYS" | awk '/PrivateKey/ {print $2}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey/ {print $2}')
-SHORT_ID=$(head /dev/urandom | tr -dc a-f0-9 | head -c 8)
+SHORT_ID=$(head -c 16 /dev/urandom | xxd -p)
 SNI="www.bing.com"
 DOMAIN=$(curl -s ipv4.ip.sb)
 TAG="skydoing-vless-reality"
 
+echo "[*] 生成 sing-box 配置文件..."
 cat > "$CONFIG_DIR/config.json" <<EOF
 {
-  "log": {"level":"info","output":"$LOG_PATH"},
-  "inbounds":[
+  "log": {
+    "level": "info",
+    "output": "$LOG_PATH"
+  },
+  "inbounds": [
     {
-      "type":"vless",
-      "listen":"0.0.0.0",
-      "port":443,
-      "tag":"vless-in",
-      "settings":{
-        "clients":[{"id":"$UUID","flow":"xtls-rprx-vision"}],
-        "decryption":"none"
+      "type": "vless",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "tag": "vless-in",
+      "settings": {
+        "clients": [
+          {
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
       },
-      "stream":{
-        "network":"tcp",
-        "security":"reality",
-        "reality":{
-          "enabled":true,
-          "handshake":{"server":"$SNI","server_port":443},
-          "private_key":"$PRIVATE_KEY",
-          "short_id":["$SHORT_ID"]
+      "stream": {
+        "network": "tcp",
+        "security": "reality",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$SNI",
+            "server_port": 443
+          },
+          "private_key": "$PRIVATE_KEY",
+          "short_id": [
+            "$SHORT_ID"
+          ]
         }
       }
     }
   ],
-  "outbounds":[{"type":"direct"},{"type":"block","tag":"block"}]
+  "outbounds": [
+    {
+      "type": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ]
 }
 EOF
 
-echo "[*] 设置 systemd 服务..."
-
-cat > /etc/systemd/system/sing-box.service <<EOF
+echo "[*] 创建 systemd 服务..."
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Sing-box Service
 After=network.target
@@ -116,30 +137,40 @@ EOF
 systemctl daemon-reload
 systemctl enable --now sing-box
 
-echo "[*] 生成节点链接与二维码..."
-
+echo "[*] 生成节点链接和二维码..."
 VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&sni=${SNI}#${TAG}"
-
 echo "$VLESS_URL" > "$URL_PATH"
-
 qrencode -o "$QR_PATH" "$VLESS_URL"
 
-echo "[*] 安装 sb 管理脚本..."
-
-cat > /usr/bin/sb << 'SCRIPT'
+echo "[*] 安装 sb 管理菜单脚本..."
+cat > /usr/bin/sb << 'EOF'
 #!/bin/bash
 CONFIG_DIR="/etc/sing-box"
 URL_PATH="$CONFIG_DIR/qrcode/vless_reality.txt"
 LOG_PATH="$CONFIG_DIR/log/access.log"
 
-view_link(){ [[ -f "$URL_PATH" ]] && cat "$URL_PATH" || echo "链接不存在"; }
+view_link(){
+  if [[ -f "$URL_PATH" ]]; then
+    cat "$URL_PATH"
+  else
+    echo "链接不存在"
+  fi
+}
 
 show_qr(){
-  [[ -f "$URL_PATH" ]] && cat "$URL_PATH" | qrencode -t ansiutf8 || echo "二维码未生成"
+  if [[ -f "$URL_PATH" ]]; then
+    cat "$URL_PATH" | qrencode -t ansiutf8
+  else
+    echo "二维码未生成"
+  fi
 }
 
 view_log(){
-  [[ -f "$LOG_PATH" ]] && tail -n 50 "$LOG_PATH" || echo "暂无日志"
+  if [[ -f "$LOG_PATH" ]]; then
+    tail -n 50 "$LOG_PATH"
+  else
+    echo "暂无日志"
+  fi
 }
 
 restart_singbox(){
@@ -147,12 +178,15 @@ restart_singbox(){
 }
 
 status_singbox(){
-  systemctl status sing-box
+  systemctl status sing-box --no-pager
 }
 
 open_port(){
   PORT=$(jq -r '.inbounds[0].port' "/etc/sing-box/config.json")
-  [[ -z "$PORT" ]] && { echo "读取端口失败"; return; }
+  if [[ -z "$PORT" ]]; then
+    echo "读取端口失败"
+    return
+  fi
   iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
   ip6tables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
   echo "已放行端口 $PORT"
@@ -165,7 +199,7 @@ while true; do
 1. 查看节点链接
 2. 显示二维码（终端扫码）
 3. 查看最近日志
-4. 重启 sing-box 
+4. 重启 sing-box
 5. 查看服务状态
 6. 自动放行端口
 7. 退出
@@ -178,16 +212,15 @@ EOM
     4) restart_singbox ;;
     5) status_singbox ;;
     6) open_port ;;
-    7) exit ;;
-    *) echo "无效";;
+    7) exit 0 ;;
+    *) echo "无效选项" ;;
   esac
-  read -n1 -p "按任意键继续…"
+  read -n1 -rsp $'按任意键继续...\n'
 done
-SCRIPT
+EOF
 
 chmod +x /usr/bin/sb
 
-echo
-echo "✅ 安装完成！执行 sb 启动管理菜单。"
+echo -e "\n✅ 安装完成！运行 sb 命令启动管理菜单。"
 echo "节点链接："
 cat "$URL_PATH"
