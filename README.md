@@ -15,6 +15,20 @@ bash -c "$(curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/refs/he
 
 
 
+
+
+
+
+
+
+bash <(curl -fsSL https://raw.githubusercontent.com/sky1793456/singbox/refs/heads/main/install.sh)
+
+
+
+
+
+
+
 # 安装 BBR
 sb bbr install
 
