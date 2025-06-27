@@ -1,5 +1,5 @@
 #!/bin/bash
-# 修复版：一键部署 VLESS + Reality，并创建 sb 管理菜单
+# 一键部署 VLESS + Reality，使用官方稳定版本 sing-box，并创建 sb 管理菜单
 
 set -e
 
@@ -8,19 +8,26 @@ QR_PATH="$CONFIG_DIR/qrcode/vless_reality.png"
 URL_PATH="$CONFIG_DIR/qrcode/vless_reality.txt"
 LOG_PATH="$CONFIG_DIR/log/access.log"
 
+# 需 root 权限
 [[ $EUID -ne 0 ]] && echo "请用 root 运行本脚本！" && exit 1
 
 echo "[*] 安装依赖..."
 apt update -y
 apt install -y curl wget jq qrencode uuid-runtime iptables
 
-echo "[*] 下载最新 Sing-box..."
+echo "[*] 获取最新稳定版本 Sing-box..."
 ARCH=$(uname -m)
 [[ $ARCH == "x86_64" ]] && ARCH="amd64"
 [[ $ARCH == "aarch64" ]] && ARCH="arm64"
+
+# 拉取最新版本号（tag）并去除v前缀，拼接下载链接
 VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-URL="https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER}-linux-${ARCH}.tar.gz"
+VER_NO_V=${VER#v}
+
+URL="https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER_NO_V}-linux-${ARCH}.tar.gz"
+
 mkdir -p /tmp/singbox && cd /tmp/singbox
+echo "[*] 下载：$URL"
 curl -fsSL -O "$URL"
 tar -xzf sing-box-*.tar.gz
 install -m 755 sing-box*/sing-box /usr/local/bin/sing-box
@@ -40,11 +47,26 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 {
   "log": {"level":"info","output":"$LOG_PATH"},
   "inbounds":[
-    {"type":"vless","listen":"0.0.0.0","port":443,"tag":"vless-in",
-     "settings":{"clients":[{"id":"$UUID","flow":"xtls-rprx-vision"}],"decryption":"none"},
-     "stream":{"network":"tcp","security":"reality",
-       "reality":{"enabled":true,"handshake":{"server":"$SNI","server_port":443},
-                  "private_key":"$PRIVATE_KEY","short_id":["$SHORT_ID"]}}}
+    {
+      "type":"vless",
+      "listen":"0.0.0.0",
+      "port":443,
+      "tag":"vless-in",
+      "settings":{
+        "clients":[{"id":"$UUID","flow":"xtls-rprx-vision"}],
+        "decryption":"none"
+      },
+      "stream":{
+        "network":"tcp",
+        "security":"reality",
+        "reality":{
+          "enabled":true,
+          "handshake":{"server":"$SNI","server_port":443},
+          "private_key":"$PRIVATE_KEY",
+          "short_id":["$SHORT_ID"]
+        }
+      }
+    }
   ],
   "outbounds":[{"type":"direct"},{"type":"block","tag":"block"}]
 }
@@ -55,9 +77,11 @@ cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
 After=network.target
+
 [Service]
 ExecStart=/usr/local/bin/sing-box run -c $CONFIG_DIR/config.json
 Restart=on-failure
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -70,7 +94,7 @@ VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&s
 echo "$VLESS_URL" > "$URL_PATH"
 qrencode -o "$QR_PATH" "$VLESS_URL"
 
-echo "[*] 安装管理脚本 sb..."
+echo "[*] 安装 sb 管理脚本..."
 cat > /usr/bin/sb << 'EOF'
 #!/bin/bash
 CONFIG_DIR="/etc/sing-box"
