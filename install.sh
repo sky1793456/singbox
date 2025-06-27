@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sing-box VLESS+Reality 一键部署 —— 完整跨系统修正版
+# Sing-box VLESS+Reality 一键部署 —— 去除 xxd、完美跨系统支持
 
 set -e
 
@@ -81,7 +81,8 @@ UUID=$(uuidgen)
 KEYS=$("$BIN_PATH" generate reality-key)
 PRIVATE_KEY=$(echo "$KEYS" | awk '/PrivateKey/ {print $2}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey/ {print $2}')
-SHORT_ID=$(head -c16 /dev/urandom | xxd -p -c16)
+# 取16位十六进制 ShortID，无需 xxd
+SHORT_ID=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 16)
 SNI="www.bing.com"
 DOMAIN=$(curl -s ipv4.ip.sb)
 TAG="skydoing-vless-reality"
@@ -107,16 +108,18 @@ cat >"$SERVICE_FILE" <<SVC
 [Unit]
 Description=Sing-box Service
 After=network.target
+
 [Service]
 ExecStart=$BIN_PATH run -c $CONFIG_DIR/config.json
 Restart=on-failure
+
 [Install]
 WantedBy=multi-user.target
 SVC
 systemctl daemon-reload
 systemctl enable --now sing-box
 
-# 8. 生成链接和二维码
+# 8. 生成节点链接和二维码
 echo "[*] 生成节点链接和二维码..."
 VLESS_URL="vless://$UUID@$DOMAIN:443?encryption=none&flow=xtls-rprx-vision&security=reality&pbk=$PUBLIC_KEY&sid=$SHORT_ID&sni=$SNI#$TAG"
 echo "$VLESS_URL" >"$URL_PATH"
@@ -133,7 +136,7 @@ LOG_PATH="$CONFIG_DIR/log/access.log"
 view_link(){ [[ -f "$URL_PATH" ]] && cat "$URL_PATH" || echo "链接不存在"; }
 show_qr(){ [[ -f "$URL_PATH" ]] && cat "$URL_PATH" | qrencode -t ansiutf8 || echo "二维码未生成"; }
 view_log(){ [[ -f "$LOG_PATH" ]] && tail -n50 "$LOG_PATH" || echo "暂无日志"; }
-restart(){ systemctl restart sing-box && echo "重启完成"; }
+restart(){ systemctl restart sing-box && echo "已重启服务"; }
 status(){ systemctl status sing-box --no-pager; }
 open_port(){
   P=$(jq -r '.inbounds[0].port' "/etc/sing-box/config.json")
@@ -169,7 +172,7 @@ done
 MENU
 chmod +x /usr/bin/sb
 
-echo -e "\n✅ 安装完成！运行 'sb' 进入管理菜单"
-echo "节点链接："
-cat "$URL_PATH"
+echo -e "\n✅ 安装完成！"
+echo "运行 'sb' 进入管理菜单"
+echo "节点链接：$(cat "$URL_PATH")"
 echo "二维码路径：$QR_PATH"
