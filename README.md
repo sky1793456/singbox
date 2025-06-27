@@ -6,22 +6,15 @@ singbox
 
 
 
-bash -c "$(curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/main/install_singbox.sh)"
 
 
 
 
-bash -c "$(curl -Ls https://raw.githubusercontent.com/sky1793456/singbox/refs/heads/main/install.sh)
+wget -O install.sh https://raw.githubusercontent.com/sky1793456/singbox/main/install.sh
+chmod +x install.sh
+./install.sh
 
 
-
-
-
-
-
-
-
-bash <(curl -fsSL https://raw.githubusercontent.com/sky1793456/singbox/refs/heads/main/install.sh)
 
 
 
