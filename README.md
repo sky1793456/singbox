@@ -10,7 +10,7 @@ singbox
 
 
 
-wget -O install.sh https://raw.githubusercontent.com/sky1793456/singbox/main/install.sh
+wget -O install.sh https://raw.githubusercontent.com/sky1793456/singbox/refs/heads/main/install.sh
 chmod +x install.sh
 ./install.sh
 
