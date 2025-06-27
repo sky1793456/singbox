@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键部署 VLESS + Reality 并创建菜单命令 sb
+# 修复版：一键部署 VLESS + Reality，并创建 sb 菜单管理命令
 
 set -e
 
@@ -9,10 +9,11 @@ URL_PATH="$CONFIG_DIR/qrcode/vless_reality.txt"
 LOG_PATH="$CONFIG_DIR/log/access.log"
 
 # 检查 root
-[[ $EUID -ne 0 ]] && echo "请使用 root 运行本脚本！" && exit 1
+[[ $EUID -ne 0 ]] && echo "请用 root 运行本脚本！" && exit 1
 
 echo "[*] 安装依赖..."
-apt update -y && apt install -y curl wget jq qrencode
+apt update -y
+apt install -y curl wget jq qrencode uuid-runtime iptables
 
 echo "[*] 下载最新 Sing-box..."
 ARCH=$(uname -m)
@@ -80,7 +81,7 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 }
 EOF
 
-echo "[*] 设置 systemd 服务..."
+echo "[*] 创建 systemd 服务..."
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -97,12 +98,13 @@ EOF
 systemctl daemon-reload
 systemctl enable --now sing-box
 
+echo "[*] 生成链接与二维码..."
 VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&sni=${SNI}#${TAG}"
 echo "$VLESS_URL" > "$URL_PATH"
 qrencode -o "$QR_PATH" "$VLESS_URL"
 
-echo "[*] 创建 sb 管理菜单..."
-cat > /usr/bin/sb <<'EOF'
+echo "[*] 安装菜单命令：sb"
+cat > /usr/bin/sb << 'EOF'
 #!/bin/bash
 CONFIG_DIR="/etc/sing-box"
 QR_PATH="$CONFIG_DIR/qrcode/vless_reality.png"
@@ -138,12 +140,8 @@ open_firewall_port() {
   PORT=$(jq -r '.inbounds[0].port' "$CONFIG_DIR/config.json" 2>/dev/null)
   [[ -z "$PORT" ]] && echo "无法读取端口。" && return
   echo "[*] 当前监听端口：$PORT"
-  if command -v ufw &>/dev/null; then
-    ufw allow "$PORT"/tcp
-  else
-    iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
-    ip6tables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
-  fi
+  iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
+  ip6tables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
   echo "✅ 端口 $PORT 已放行"
 }
 
@@ -177,6 +175,6 @@ EOF
 chmod +x /usr/bin/sb
 
 echo
-echo "✅ 安装完成！你现在可以运行：sb"
-echo "或复制链接："
+echo "✅ 安装完成！你现在可以运行命令：sb"
+echo "📌 节点链接如下："
 cat "$URL_PATH"
