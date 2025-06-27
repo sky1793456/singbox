@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # sing-box 一键安装脚本（修改版）
-# 修复 Reality 密钥生成问题，完善依赖安装和服务启动
+# 修复 Reality 密钥生成和下载解压文件名问题
+# 自动安装 curl wget 依赖
 
 set -e
 
@@ -9,7 +10,7 @@ BIN_PATH="/usr/local/bin/sing-box"
 CONFIG_DIR="/etc/sing-box"
 KEY_FILE="$CONFIG_DIR/keys.txt"
 
-# 检查并安装必备命令 curl wget
+# 安装依赖函数
 install_dep() {
   echo "[*] 检查依赖: curl wget"
   for cmd in curl wget; do
@@ -39,9 +40,7 @@ mkdir -p "$CONFIG_DIR"
 echo "[*] 获取 Sing-box 最新版本下载链接…"
 LATEST_JSON=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest)
 VERSION=$(echo "$LATEST_JSON" | grep -Po '"tag_name": "\K.*?(?=")')
-VERSION_NO_V=${VERSION#v}  # 去掉前缀 v
-
-DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/$VERSION/sing-box-$VERSION_NO_V-linux-amd64.tar.gz"
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/$VERSION/sing-box-$VERSION-linux-amd64.tar.gz"
 
 echo "    → 版本: $VERSION"
 echo "    → 链接: $DOWNLOAD_URL"
@@ -50,10 +49,18 @@ echo "    → 链接: $DOWNLOAD_URL"
 echo "[*] 下载并安装 sing-box ..."
 curl -L "$DOWNLOAD_URL" -o /tmp/sing-box.tar.gz
 tar -zxf /tmp/sing-box.tar.gz -C /tmp
-chmod +x /tmp/sing-box
-mv /tmp/sing-box "$BIN_PATH"
 
-# 生成 Reality 密钥对，直接解析命令输出
+EXTRACTED_BIN="/tmp/sing-box-$VERSION-linux-amd64"
+
+if [ ! -f "$EXTRACTED_BIN" ]; then
+  echo "错误：找不到解压后的 sing-box 可执行文件：$EXTRACTED_BIN"
+  exit 1
+fi
+
+chmod +x "$EXTRACTED_BIN"
+mv "$EXTRACTED_BIN" "$BIN_PATH"
+
+# 生成 Reality 密钥对
 echo "[*] 生成 Reality 密钥对..."
 KEY_OUTPUT=$("$BIN_PATH" generate reality-key)
 if [[ $? -ne 0 || -z "$KEY_OUTPUT" ]]; then
@@ -74,7 +81,7 @@ fi
 echo "$KEY_OUTPUT" > "$KEY_FILE"
 echo "[*] Reality 密钥对已保存到 $KEY_FILE"
 
-# 写入示例配置文件（请根据实际需求修改）
+# 生成示例配置文件
 cat > "$CONFIG_DIR/config.json" <<EOF
 {
   "inbounds": [],
@@ -89,7 +96,7 @@ EOF
 
 echo "[*] 配置文件已写入 $CONFIG_DIR/config.json"
 
-# systemd 服务配置并启动
+# 设置 systemd 服务（如果支持）
 if command -v systemctl >/dev/null 2>&1; then
   echo "[*] 设置 sing-box 服务开机启动"
   cat >/etc/systemd/system/sing-box.service <<EOF
